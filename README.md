@@ -9,6 +9,7 @@ This system provides:
 2. **Streaming Ingestion**: Real-time processing of log files into Delta tables
 3. **Anomaly Detection**: Hourly analysis detecting 6+ types of anomalies
 4. **Alert Management**: Automated alerting with severity-based notifications
+5. **Lakehouse Monitoring**: Data quality and drift monitoring with custom metrics
 
 ## Architecture
 
@@ -51,7 +52,14 @@ This system provides:
               ┌──────────────────┐
               │ Anomalies Table  │
               │ + Alerts/Dashboards│
-              └──────────────────┘
+              └──────────┬───────┘
+                         │
+                         ↓ (On-demand)
+              ┌────────────────────────┐
+              │ Lakehouse Monitoring   │ → Data quality checks
+              │  (Optional Setup)      │ → Custom metrics
+              │                        │ → Drift detection
+              └────────────────────────┘
 ```
 
 ## Project Structure
@@ -68,9 +76,11 @@ LogAnomalyDetection/
 │   │   ├── ingest_audit_logs.py        # Audit log ingestion
 │   │   ├── ingest_bpm_logs.py          # BPM log ingestion
 │   │   └── ingest_performance_logs.py  # Performance log ingestion
-│   └── anomaly_detection/
-│       ├── anomaly_detector.py         # Anomaly detection logic
-│       └── alert_handler.py            # Alert handling & notifications
+│   ├── anomaly_detection/
+│   │   ├── anomaly_detector.py         # Anomaly detection logic
+│   │   └── alert_handler.py            # Alert handling & notifications
+│   └── monitoring/
+│       └── setup_lakehouse_monitoring.py  # Lakehouse monitoring setup
 └── data_templates/                     # Log templates for generation
     ├── audit/
     ├── bpm/
@@ -170,18 +180,23 @@ databricks bundle run anomaly_detection_job -t dev
 ### Starting the System
 
 1. **Start Log Generator**: Runs continuously, generates logs every 5 seconds
-   ```
-   Run: log_generator_job
+   ```bash
+   databricks bundle run log_generator_job -t dev
    ```
 
 2. **Start Streaming Ingestion**: Runs continuously, processes incoming logs
-   ```
-   Run: streaming_ingestion_job
+   ```bash
+   databricks bundle run streaming_ingestion_job -t dev
    ```
 
-3. **Anomaly Detection**: Runs hourly (automated via schedule)
+3. **Setup Lakehouse Monitoring**: Run once to configure monitors (optional)
+   ```bash
+   databricks bundle run lakehouse_monitoring_setup_job -t dev
    ```
-   Run: anomaly_detection_job
+
+4. **Anomaly Detection**: Runs hourly (automated via schedule)
+   ```bash
+   databricks bundle run anomaly_detection_job -t dev
    ```
 
 ### Monitoring
@@ -227,6 +242,78 @@ The alert handler generates dashboard queries automatically. You can also create
 2. Severity distribution (pie chart)
 3. Top affected services (bar chart)
 4. Recent critical anomalies (table)
+
+## Lakehouse Monitoring
+
+The system includes comprehensive Lakehouse Monitoring with custom metrics for data quality and performance tracking.
+
+### Custom Metrics by Table
+
+**Audit Logs:**
+- Hourly failure rate
+- Average response time (ms)
+- P95 response time (ms)
+- High response time count
+- Unique services count
+- Error rate
+
+**BPM Logs:**
+- Timeout rate
+- Average total elapsed time (ms)
+- Incomplete trails rate
+- High response time rate
+
+**Performance Logs:**
+- Average response time (ms)
+- Max response time (ms)
+- Incomplete operations rate
+- Very high response time rate (>60s)
+- Average trail marks count
+
+**Anomalies Table:**
+- Critical anomaly rate
+- High severity anomaly rate
+- Unique anomaly types
+- Average metric value
+- Threshold breach ratio
+
+### Monitor Configuration
+
+- **Granularities**: 1 hour and 1 day time windows
+- **Schedules**: 
+  - Log tables: Every 6 hours
+  - Anomalies table: Every hour
+- **Slicing**: Metrics calculated per service, cluster, and application
+- **CDF**: Automatically enabled on all monitored tables
+
+### Viewing Monitor Data
+
+**Access monitors in Databricks UI:**
+1. Navigate to **Data** > **[Your Catalog]** > **[Your Schema]**
+2. Click on any monitored table
+3. Go to the **Quality** tab
+
+**Query profile metrics:**
+```sql
+-- Audit logs response time trends
+SELECT 
+    window.start as time_window,
+    avg_response_time_ms,
+    p95_response_time_ms,
+    hourly_failure_rate
+FROM daniel_perez.log_anomaly_dev.audit_logs_profile_metrics
+WHERE window.start >= current_timestamp() - INTERVAL 7 DAYS
+ORDER BY window.start;
+
+-- Anomalies severity distribution
+SELECT 
+    window.start as time_window,
+    critical_anomaly_rate * 100 as critical_percent,
+    high_anomaly_rate * 100 as high_percent
+FROM daniel_perez.log_anomaly_dev.anomalies_profile_metrics
+WHERE window.start >= current_timestamp() - INTERVAL 7 DAYS
+ORDER BY window.start;
+```
 
 ## Configuration Parameters
 
