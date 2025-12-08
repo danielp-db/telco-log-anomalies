@@ -1,0 +1,46 @@
+# Common Configuration for Log Anomaly Detection System
+# This file contains shared settings, paths, and thresholds used across all notebooks.
+
+# Database Configuration
+# These will be overridden by notebook parameters from databricks.yml
+database:
+  catalog: "daniel_perez"
+  schema: "log_anomaly"
+  volume_name: "raw_logs"
+
+# Log Generation Settings
+log_generation:
+  interval_seconds: 5        # Generate logs every 5 seconds
+  logs_per_batch: 50         # Number of log entries per batch
+  anomaly_injection_rate: 0.05  # 5% of logs will be anomalies
+
+# Streaming Settings
+streaming:
+  max_files_per_trigger: 10
+  trigger_processing_time: "10 seconds"
+
+# Anomaly Detection Thresholds
+anomaly_detection:
+  failure_rate_threshold_multiplier: 2.0      # Alert if 2x normal failure rate
+  high_response_time_p95_threshold_ms: 30000  # 30 seconds
+  high_response_time_p99_threshold_ms: 60000  # 60 seconds
+  missing_heartbeat_interval_minutes: 5       # Alert if no logs for 5 minutes
+  volume_anomaly_threshold_multiplier: 3.0    # Alert if 3x or 0.33x normal volume
+  degradation_increase_threshold_percent: 50  # 50% increase in response time
+
+# Time Windows for Analysis
+time_windows:
+  short_window_minutes: 5
+  medium_window_minutes: 15
+  long_window_minutes: 30
+  baseline_window_days: 7
+
+# Alert Configuration
+alerts:
+  severity_levels:
+    CRITICAL: 1
+    HIGH: 2
+    MEDIUM: 3
+    LOW: 4
+    INFO: 5
+

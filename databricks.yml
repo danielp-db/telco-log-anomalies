@@ -1,0 +1,176 @@
+# This is a Databricks asset bundle definition for LogAnomalyDetection.
+# The Databricks extension requires databricks.yml configuration file.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+
+bundle:
+  name: LogAnomalyDetection
+
+variables:
+  catalog:
+    description: "Catalog name for Delta tables"
+    default: main
+  schema:
+    description: "Schema name for Delta tables"
+    default: log_anomaly_db
+  volume_name:
+    description: "Volume name for raw log files"
+    default: raw_logs
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-361426925668745.5.azuredatabricks.net
+    variables:
+      catalog: daniel_perez
+      schema: log_anomaly_dev
+      volume_name: raw_logs_dev
+
+  ## Optionally, there could be 'staging' or 'prod' targets here.
+  #
+  # prod:
+  #   mode: production
+  #   workspace:
+  #     host: https://adb-361426925668745.5.azuredatabricks.net
+  #   variables:
+  #     catalog: main
+  #     schema: log_anomaly_prod
+  #     volume_name: raw_logs_prod
+
+resources:
+  clusters:
+    shared_log_analysis_cluster:
+      cluster_name: "[${bundle.target}] Log Analysis Shared Cluster"
+      spark_version: 17.3.x-scala2.13
+      node_type_id: Standard_D8s_v3
+      data_security_mode: USER_ISOLATION
+      autoscale:
+        min_workers: 1
+        max_workers: 4
+      spark_conf:
+        spark.databricks.delta.preview.enabled: "true"
+      autotermination_minutes: 30
+      custom_tags:
+        Project: "LogAnomalyDetection"
+        Environment: "${bundle.target}"
+
+  # schemas:
+  #   log_anomaly_schema:
+  #     name: ${var.schema}
+  #     catalog_name: ${var.catalog}
+  #     comment: "Schema for log anomaly detection system - contains logs and anomalies tables"
+  #     properties:
+  #       environment: "${bundle.target}"
+  #       project: "LogAnomalyDetection"
+
+  # volumes:
+  #   raw_logs_volume:
+  #     name: ${var.volume_name}
+  #     catalog_name: ${var.catalog}
+  #     schema_name: ${var.schema}
+  #     volume_type: MANAGED
+  #     comment: "Volume for storing raw log files for anomaly detection system"
+
+  jobs:
+    log_generator_job:
+      name: "[${bundle.target}] Log Generator - Continuous"
+      
+      tasks:
+        - task_key: generate_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/log_generator/generator_notebook.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+      
+      max_concurrent_runs: 1
+      continuous:
+        pause_status: PAUSED
+
+    streaming_ingestion_job:
+      name: "[${bundle.target}] Streaming Ingestion Pipeline"
+      
+      tasks:
+        - task_key: ingest_audit_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_audit_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+        
+        - task_key: ingest_bpm_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_bpm_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+        
+        - task_key: ingest_performance_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_performance_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+      
+      max_concurrent_runs: 1
+      continuous:
+        pause_status: PAUSED
+
+    anomaly_detection_job:
+      name: "[${bundle.target}] Anomaly Detection - Hourly"
+      
+      tasks:
+        - task_key: detect_anomalies
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/anomaly_detection/anomaly_detector.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+        
+        - task_key: handle_alerts
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          depends_on:
+            - task_key: detect_anomalies
+          notebook_task:
+            notebook_path: ./src/anomaly_detection/alert_handler.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+      
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: "UTC"
+        pause_status: PAUSED
+      
+      max_concurrent_runs: 1
+
+    lakehouse_monitoring_setup_job:
+      name: "[${bundle.target}] Lakehouse Monitoring Setup"
+      
+      tasks:
+        - task_key: setup_monitors
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/monitoring/setup_lakehouse_monitoring.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+      
+      max_concurrent_runs: 1
