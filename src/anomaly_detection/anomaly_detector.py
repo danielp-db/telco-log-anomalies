@@ -288,9 +288,9 @@ def detect_high_response_times(config, time_windows):
             expr(f"percentile(response_time_ms, 0.95)").alias("p95"),
             expr(f"percentile(response_time_ms, 0.99)").alias("p99"),
             avg("response_time_ms").alias("avg_response_time"),
-            count("*").alias("count")
+            count("*").alias("count_rows")
         )
-        .filter(col("count") >= 10)
+        .filter(col("count_rows") >= 10)
     )
     
     # Detect services with high P95 or P99
@@ -322,7 +322,7 @@ def detect_high_response_times(config, time_windows):
             threshold_value=threshold,
             baseline_value=row.avg_response_time,
             details=f"High response time detected: {metric_name}={metric:.0f}ms (avg: {row.avg_response_time:.0f}ms)",
-            log_count=row.count,
+            log_count=row.count_rows,
             metadata={
                 "p95": str(row.p95),
                 "p99": str(row.p99)
@@ -346,7 +346,7 @@ def detect_high_response_times(config, time_windows):
             avg("response_time_ms").alias("avg_response_time"),
             count("*").alias("count_rows")
         )
-        .filter(col("count") >= 10)
+        .filter(col("count_rows") >= 10)
         .filter((col("p95") > config["high_response_time_p95_threshold_ms"]) |
                 (col("p99") > config["high_response_time_p99_threshold_ms"]))
     )
@@ -386,7 +386,7 @@ def detect_high_response_times(config, time_windows):
     
     print(f"Found {len(anomalies)} high response time anomalies")
     return anomalies
-    
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -717,8 +717,29 @@ def save_anomalies(anomalies, config):
         print("No anomalies to save.")
         return
     
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, TimestampType, MapType
+
+    anomaly_schema = StructType([
+        StructField("anomaly_id", StringType(), False),
+        StructField("anomaly_type", StringType(), True),
+        StructField("severity", StringType(), True),
+        StructField("detected_at", TimestampType(), True),
+        StructField("time_window_start", TimestampType(), True),
+        StructField("time_window_end", TimestampType(), True),
+        StructField("affected_service", StringType(), True),
+        StructField("affected_instance", StringType(), True),
+        StructField("affected_cluster", StringType(), True),
+        StructField("metric_name", StringType(), True),
+        StructField("metric_value", DoubleType(), True),
+        StructField("threshold_value", DoubleType(), True),
+        StructField("baseline_value", DoubleType(), True),
+        StructField("details", StringType(), True),
+        StructField("log_count", LongType(), True),
+        StructField("metadata", MapType(StringType(), StringType()), True)
+    ])
+
     # Convert to DataFrame
-    anomalies_df = spark.createDataFrame(anomalies)
+    anomalies_df = spark.createDataFrame(anomalies, schema=anomaly_schema)
     
     # Ensure the database exists
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {config['catalog']}.{config['schema']}")

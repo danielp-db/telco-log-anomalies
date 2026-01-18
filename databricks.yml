@@ -29,7 +29,22 @@ targets:
       catalog: daniel_perez
       schema: log_anomaly_dev
       volume_name: raw_logs_dev
-
+  fe:
+    mode: development
+    default: false
+    workspace:
+      host: https://adb-984752964297111.11.azuredatabricks.net
+    variables:
+      catalog: daniel_perez
+      schema: log_anomaly_dev
+      volume_name: raw_logs_dev
+    permissions:
+      - user_name: bhupendra.patil@databricks.com
+        level: CAN_MANAGE
+      - user_name: daniel.perez@databricks.com
+        level: CAN_MANAGE
+      - user_name: hemant.borole@databricks.com
+        level: CAN_MANAGE
   ## Optionally, there could be 'staging' or 'prod' targets here.
   #
   # prod:
