@@ -50,9 +50,12 @@ import databricks.lakehouse_monitoring as lm
 print("Checking and enabling Change Data Feed (CDF) on tables...\n")
 
 tables_to_monitor = [
-    f"{catalog}.{schema}.audit_logs",
-    f"{catalog}.{schema}.bpm_logs",
-    f"{catalog}.{schema}.performance_logs",
+    f"{catalog}.{schema}.{yaml_config['log_types']['bpm_adapter']}",
+    f"{catalog}.{schema}.{yaml_config['log_types']['bpm_audit']}",
+    f"{catalog}.{schema}.{yaml_config['log_types']['bpm_perf']}",
+    f"{catalog}.{schema}.{yaml_config['log_types']['m2e_audit']}",
+    f"{catalog}.{schema}.{yaml_config['log_types']['m2e_perf']}",
+    f"{catalog}.{schema}.{yaml_config['log_types']['maf_perf']}",
     f"{catalog}.{schema}.anomalies"
 ]
 

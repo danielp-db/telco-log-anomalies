@@ -37,9 +37,12 @@ schema = dbutils.widgets.get("schema")
 config = {
     "catalog": catalog,
     "schema": schema,
-    "audit_table": f"{catalog}.{schema}.audit_logs",
-    "bpm_table": f"{catalog}.{schema}.bpm_logs",
-    "performance_table": f"{catalog}.{schema}.performance_logs",
+    "bpm_adapter_table": f"{catalog}.{schema}.{yaml_config['log_types']['bpm_adapter']}",
+    "bpm_audit_table": f"{catalog}.{schema}.{yaml_config['log_types']['bpm_audit']}",
+    "bpm_perf_table": f"{catalog}.{schema}.{yaml_config['log_types']['bpm_perf']}",
+    "m2e_audit_table": f"{catalog}.{schema}.{yaml_config['log_types']['m2e_audit']}",
+    "m2e_perf_table": f"{catalog}.{schema}.{yaml_config['log_types']['m2e_perf']}",
+    "maf_perf_table": f"{catalog}.{schema}.{yaml_config['log_types']['maf_perf']}",
     "anomalies_table": f"{catalog}.{schema}.anomalies",
     **yaml_config["anomaly_detection"],
     **yaml_config["time_windows"],
@@ -119,76 +122,92 @@ def create_anomaly_record(anomaly_type, severity, time_window_start, time_window
 def detect_failure_rate_spikes(config, time_windows):
     """
     Detect sudden spikes in failure rates compared to baseline
+    Analyzes all audit log tables
     """
     print("\n=== Detecting Failure Rate Spikes ===")
     
-    audit_table = config["audit_table"]
     anomalies = []
     
-    # Read audit logs
-    audit_logs = spark.table(audit_table)
+    # Check all audit tables
+    audit_tables = [
+        ("bpm_audit_table", "bpm_audit_logs"),
+        ("m2e_audit_table", "m2e_audit_logs")
+    ]
     
-    # Calculate current failure rate (last 15 minutes)
-    current_failures = (audit_logs
-        .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .groupBy("transaction_name")
-        .agg(
-            count("*").alias("total_count"),
-            sum(when(col("is_failure"), 1).otherwise(0)).alias("failure_count")
-        )
-        .withColumn("current_failure_rate", 
-                    (col("failure_count") / col("total_count")) * 100)
-    )
-    
-    # Calculate baseline failure rate (past 7 days, excluding last hour)
-    baseline_failures = (audit_logs
-        .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
-                (col("log_timestamp") <= lit(time_windows["baseline_end"])))
-        .groupBy("transaction_name")
-        .agg(
-            count("*").alias("baseline_total"),
-            sum(when(col("is_failure"), 1).otherwise(0)).alias("baseline_failure_count")
-        )
-        .withColumn("baseline_failure_rate", 
-                    (col("baseline_failure_count") / col("baseline_total")) * 100)
-    )
-    
-    # Compare current vs baseline
-    comparison = (current_failures
-        .join(baseline_failures, "transaction_name", "left")
-        .withColumn("rate_multiplier", 
-                    col("current_failure_rate") / (col("baseline_failure_rate") + 0.01))
-        .filter(col("rate_multiplier") >= config["failure_rate_threshold_multiplier"])
-        .filter(col("total_count") >= 10)  # Minimum sample size
-    )
-    
-    # Collect anomalies
-    for row in comparison.collect():
-        severity = "CRITICAL" if row.rate_multiplier >= 5 else "HIGH"
+    for table_key, table_name in audit_tables:
+        table_path = config[table_key]
+        print(f"\nAnalyzing {table_name}...")
         
-        anomaly = create_anomaly_record(
-            anomaly_type="FAILURE_RATE_SPIKE",
-            severity=severity,
-            time_window_start=time_windows["medium_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.transaction_name,
-            metric_name="failure_rate_percent",
-            metric_value=row.current_failure_rate,
-            threshold_value=row.baseline_failure_rate * config["failure_rate_threshold_multiplier"],
-            baseline_value=row.baseline_failure_rate,
-            details=f"Failure rate spike detected: {row.current_failure_rate:.2f}% vs baseline {row.baseline_failure_rate:.2f}%",
-            log_count=row.total_count,
-            metadata={
-                "rate_multiplier": str(row.rate_multiplier),
-                "failure_count": str(row.failure_count),
-                "baseline_total": str(row.baseline_total)
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.transaction_name}: {row.current_failure_rate:.2f}% failure rate (baseline: {row.baseline_failure_rate:.2f}%)")
+        try:
+            # Read audit logs
+            audit_logs = spark.table(table_path)
+            
+            # Calculate current failure rate (last 15 minutes)
+            current_failures = (audit_logs
+                .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .groupBy("transaction_name")
+                .agg(
+                    count("*").alias("total_count"),
+                    sum(when(col("is_failure"), 1).otherwise(0)).alias("failure_count")
+                )
+                .withColumn("current_failure_rate", 
+                            (col("failure_count") / col("total_count")) * 100)
+            )
+            
+            # Calculate baseline failure rate (past 7 days, excluding last hour)
+            baseline_failures = (audit_logs
+                .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["baseline_end"])))
+                .groupBy("transaction_name")
+                .agg(
+                    count("*").alias("baseline_total"),
+                    sum(when(col("is_failure"), 1).otherwise(0)).alias("baseline_failure_count")
+                )
+                .withColumn("baseline_failure_rate", 
+                            (col("baseline_failure_count") / col("baseline_total")) * 100)
+            )
+            
+            # Compare current vs baseline
+            comparison = (current_failures
+                .join(baseline_failures, "transaction_name", "left")
+                .withColumn("rate_multiplier", 
+                            col("current_failure_rate") / (col("baseline_failure_rate") + 0.01))
+                .filter(col("rate_multiplier") >= config["failure_rate_threshold_multiplier"])
+                .filter(col("total_count") >= 10)  # Minimum sample size
+            )
+            
+            # Collect anomalies
+            for row in comparison.collect():
+                severity = "CRITICAL" if row.rate_multiplier >= 5 else "HIGH"
+                
+                anomaly = create_anomaly_record(
+                    anomaly_type="FAILURE_RATE_SPIKE",
+                    severity=severity,
+                    time_window_start=time_windows["medium_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=row.transaction_name,
+                    metric_name="failure_rate_percent",
+                    metric_value=row.current_failure_rate,
+                    threshold_value=row.baseline_failure_rate * config["failure_rate_threshold_multiplier"],
+                    baseline_value=row.baseline_failure_rate,
+                    details=f"Failure rate spike detected in {table_name}: {row.current_failure_rate:.2f}% vs baseline {row.baseline_failure_rate:.2f}%",
+                    log_count=row.total_count,
+                    metadata={
+                        "rate_multiplier": str(row.rate_multiplier),
+                        "failure_count": str(row.failure_count),
+                        "baseline_total": str(row.baseline_total),
+                        "source_table": table_name
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {row.transaction_name}: {row.current_failure_rate:.2f}% failure rate (baseline: {row.baseline_failure_rate:.2f}%)")
+        
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_name}: {str(e)}")
+            continue
     
-    print(f"Found {len(anomalies)} failure rate spike anomalies")
+    print(f"\nFound {len(anomalies)} failure rate spike anomalies")
     return anomalies
 
 # COMMAND ----------
@@ -201,62 +220,75 @@ def detect_failure_rate_spikes(config, time_windows):
 def detect_missing_heartbeats(config, time_windows):
     """
     Detect services that haven't sent logs in the expected time window
+    Checks all 9 log tables
     """
     print("\n=== Detecting Missing Heartbeats ===")
     
     anomalies = []
     threshold_time = time_windows["current_time"] - timedelta(minutes=config["missing_heartbeat_interval_minutes"])
     
-    # Check all three log types
-    for table_name, table_key in [
-        (config["audit_table"], "audit"),
-        (config["bpm_table"], "bpm"),
-        (config["performance_table"], "performance")
-    ]:
-        logs = spark.table(table_name)
-        
-        # For audit_table, add service=None
-        if table_name == config["audit_table"]:
-            logs = logs.withColumn("service", lit(None).cast(StringType()))
-        
-        # Get services that were active in the baseline period
-        baseline_services = (logs
-            .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
-                    (col("log_timestamp") <= lit(time_windows["baseline_end"])))
-            .select("service", "instance_name", "cluster")
-            .distinct()
-        ).collect()
-        
-        # Check which services are missing in the recent window
-        recent_logs = (logs
-            .filter(col("log_timestamp") >= lit(threshold_time))
-            .select("service", "instance_name", "cluster")
-            .distinct()
-        )
-        
-        recent_services = set([(r.service, r.instance_name, r.cluster) for r in recent_logs.collect()])
-        
-        for baseline_svc in baseline_services:
-            key = (baseline_svc.service, baseline_svc.instance_name, baseline_svc.cluster)
-            if key not in recent_services and baseline_svc.service is not None:
-                anomaly = create_anomaly_record(
-                    anomaly_type="MISSING_HEARTBEAT",
-                    severity="HIGH",
-                    time_window_start=threshold_time,
-                    time_window_end=time_windows["current_time"],
-                    affected_service=baseline_svc.service,
-                    affected_instance=baseline_svc.instance_name,
-                    affected_cluster=baseline_svc.cluster,
-                    metric_name="minutes_since_last_log",
-                    metric_value=config["missing_heartbeat_interval_minutes"],
-                    threshold_value=config["missing_heartbeat_interval_minutes"],
-                    details=f"No logs received from {baseline_svc.service} in the last {config['missing_heartbeat_interval_minutes']} minutes",
-                    metadata={"log_type": table_key}
-                )
-                anomalies.append(anomaly)
-                print(f"  - {table_key}: {baseline_svc.service} (instance: {baseline_svc.instance_name})")
+    # Check all log tables
+    log_tables = [
+        (config["bpm_adapter_table"], "bpm_adapter"),
+        (config["bpm_audit_table"], "bpm_audit"),
+        (config["bpm_perf_table"], "bpm_perf"),
+        (config["m2e_audit_table"], "m2e_audit"),
+        (config["m2e_perf_table"], "m2e_perf"),
+        (config["maf_perf_table"], "maf_perf")
+    ]
     
-    print(f"Found {len(anomalies)} missing heartbeat anomalies")
+    for table_name, table_key in log_tables:
+        print(f"\nChecking {table_key}...")
+        
+        try:
+            logs = spark.table(table_name)
+            
+            # For audit tables without 'service' column, use transaction_name as service
+            if table_key in ["bpm_audit", "m2e_audit"]:
+                logs = logs.withColumn("service", coalesce(col("transaction_name"), lit("unknown")))
+            
+            # Get services that were active in the baseline period
+            baseline_services = (logs
+                .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["baseline_end"])))
+                .select("service", "instance_name", "cluster")
+                .distinct()
+            ).collect()
+            
+            # Check which services are missing in the recent window
+            recent_logs = (logs
+                .filter(col("log_timestamp") >= lit(threshold_time))
+                .select("service", "instance_name", "cluster")
+                .distinct()
+            )
+            
+            recent_services = set([(r.service, r.instance_name, r.cluster) for r in recent_logs.collect()])
+            
+            for baseline_svc in baseline_services:
+                key = (baseline_svc.service, baseline_svc.instance_name, baseline_svc.cluster)
+                if key not in recent_services and baseline_svc.service is not None:
+                    anomaly = create_anomaly_record(
+                        anomaly_type="MISSING_HEARTBEAT",
+                        severity="HIGH",
+                        time_window_start=threshold_time,
+                        time_window_end=time_windows["current_time"],
+                        affected_service=baseline_svc.service,
+                        affected_instance=baseline_svc.instance_name,
+                        affected_cluster=baseline_svc.cluster,
+                        metric_name="minutes_since_last_log",
+                        metric_value=config["missing_heartbeat_interval_minutes"],
+                        threshold_value=config["missing_heartbeat_interval_minutes"],
+                        details=f"No logs received from {baseline_svc.service} in the last {config['missing_heartbeat_interval_minutes']} minutes",
+                        metadata={"log_type": table_key}
+                    )
+                    anomalies.append(anomaly)
+                    print(f"  - {table_key}: {baseline_svc.service} (instance: {baseline_svc.instance_name})")
+        
+        except Exception as e:
+            print(f"  Warning: Could not check {table_key}: {str(e)}")
+            continue
+    
+    print(f"\nFound {len(anomalies)} missing heartbeat anomalies")
     return anomalies
 
 # COMMAND ----------
@@ -269,122 +301,154 @@ def detect_missing_heartbeats(config, time_windows):
 def detect_high_response_times(config, time_windows):
     """
     Detect transactions with abnormally high response times
+    Checks all audit and performance tables
     """
     print("\n=== Detecting High Response Times ===")
     
     anomalies = []
     
-    # Check audit logs
-    audit_logs = (spark.table(config["audit_table"])
-        .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .filter(col("response_time_ms").isNotNull())
-    )
+    # Check audit logs from all audit tables
+    audit_tables = [
+        ("bpm_audit_table", "bpm_audit_logs", "transaction_name"),
+        ("m2e_audit_table", "m2e_audit_logs", "transaction_name")
+    ]
     
-    # Calculate percentiles by service
-    audit_stats = (audit_logs
-        .groupBy("transaction_name")
-        .agg(
-            expr(f"percentile(response_time_ms, 0.95)").alias("p95"),
-            expr(f"percentile(response_time_ms, 0.99)").alias("p99"),
-            avg("response_time_ms").alias("avg_response_time"),
-            count("*").alias("count_rows")
-        )
-        .filter(col("count_rows") >= 10)
-    )
-    
-    # Detect services with high P95 or P99
-    high_response = (audit_stats
-        .filter((col("p95") > config["high_response_time_p95_threshold_ms"]) |
-                (col("p99") > config["high_response_time_p99_threshold_ms"]))
-    )
-    
-    for row in high_response.collect():
-        if row.p99 > config["high_response_time_p99_threshold_ms"]:
-            severity = "CRITICAL"
-            metric = row.p99
-            metric_name = "p99_response_time_ms"
-            threshold = config["high_response_time_p99_threshold_ms"]
-        else:
-            severity = "HIGH"
-            metric = row.p95
-            metric_name = "p95_response_time_ms"
-            threshold = config["high_response_time_p95_threshold_ms"]
+    for table_key, table_name, service_col in audit_tables:
+        print(f"\nAnalyzing {table_name}...")
         
-        anomaly = create_anomaly_record(
-            anomaly_type="HIGH_RESPONSE_TIME",
-            severity=severity,
-            time_window_start=time_windows["long_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.transaction_name,
-            metric_name=metric_name,
-            metric_value=metric,
-            threshold_value=threshold,
-            baseline_value=row.avg_response_time,
-            details=f"High response time detected: {metric_name}={metric:.0f}ms (avg: {row.avg_response_time:.0f}ms)",
-            log_count=row.count_rows,
-            metadata={
-                "p95": str(row.p95),
-                "p99": str(row.p99)
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.transaction_name}: {metric_name}={metric:.0f}ms (threshold: {threshold}ms)")
-    
-    # Check performance logs
-    perf_logs = (spark.table(config["performance_table"])
-        .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .filter(col("response_time_ms").isNotNull())
-    )
-    
-    perf_stats = (perf_logs
-        .groupBy("service")
-        .agg(
-            expr(f"percentile(response_time_ms, 0.95)").alias("p95"),
-            expr(f"percentile(response_time_ms, 0.99)").alias("p99"),
-            avg("response_time_ms").alias("avg_response_time"),
-            count("*").alias("count_rows")
-        )
-        .filter(col("count_rows") >= 10)
-        .filter((col("p95") > config["high_response_time_p95_threshold_ms"]) |
-                (col("p99") > config["high_response_time_p99_threshold_ms"]))
-    )
-    
-    for row in perf_stats.collect():
-        if row.p99 > config["high_response_time_p99_threshold_ms"]:
-            severity = "CRITICAL"
-            metric = row.p99
-            metric_name = "p99_response_time_ms"
-            threshold = config["high_response_time_p99_threshold_ms"]
-        else:
-            severity = "HIGH"
-            metric = row.p95
-            metric_name = "p95_response_time_ms"
-            threshold = config["high_response_time_p95_threshold_ms"]
+        try:
+            audit_logs = (spark.table(config[table_key])
+                .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .filter(col("response_time_ms").isNotNull())
+            )
+            
+            # Calculate percentiles by service
+            audit_stats = (audit_logs
+                .groupBy(service_col)
+                .agg(
+                    expr(f"percentile(response_time_ms, 0.95)").alias("p95"),
+                    expr(f"percentile(response_time_ms, 0.99)").alias("p99"),
+                    avg("response_time_ms").alias("avg_response_time"),
+                    count("*").alias("count_rows")
+                )
+                .filter(col("count_rows") >= 10)
+            )
+            
+            # Detect services with high P95 or P99
+            high_response = (audit_stats
+                .filter((col("p95") > config["high_response_time_p95_threshold_ms"]) |
+                        (col("p99") > config["high_response_time_p99_threshold_ms"]))
+            )
+            
+            for row in high_response.collect():
+                if row.p99 > config["high_response_time_p99_threshold_ms"]:
+                    severity = "CRITICAL"
+                    metric = row.p99
+                    metric_name = "p99_response_time_ms"
+                    threshold = config["high_response_time_p99_threshold_ms"]
+                else:
+                    severity = "HIGH"
+                    metric = row.p95
+                    metric_name = "p95_response_time_ms"
+                    threshold = config["high_response_time_p95_threshold_ms"]
+                
+                service_name = getattr(row, service_col)
+                anomaly = create_anomaly_record(
+                    anomaly_type="HIGH_RESPONSE_TIME",
+                    severity=severity,
+                    time_window_start=time_windows["long_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=service_name,
+                    metric_name=metric_name,
+                    metric_value=metric,
+                    threshold_value=threshold,
+                    baseline_value=row.avg_response_time,
+                    details=f"High response time detected in {table_name}: {metric_name}={metric:.0f}ms (avg: {row.avg_response_time:.0f}ms)",
+                    log_count=row.count_rows,
+                    metadata={
+                        "p95": str(row.p95),
+                        "p99": str(row.p99),
+                        "source_table": table_name
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {service_name}: {metric_name}={metric:.0f}ms (threshold: {threshold}ms)")
         
-        anomaly = create_anomaly_record(
-            anomaly_type="HIGH_RESPONSE_TIME",
-            severity=severity,
-            time_window_start=time_windows["long_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.service,
-            metric_name=metric_name,
-            metric_value=metric,
-            threshold_value=threshold,
-            baseline_value=row.avg_response_time,
-            details=f"High response time detected: {metric_name}={metric:.0f}ms (avg: {row.avg_response_time:.0f}ms)",
-            log_count=row.count_rows,
-            metadata={
-                "p95": str(row.p95),
-                "p99": str(row.p99),
-                "log_type": "performance"
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.service}: {metric_name}={metric:.0f}ms (threshold: {threshold}ms)")
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_name}: {str(e)}")
+            continue
     
-    print(f"Found {len(anomalies)} high response time anomalies")
+    # Check performance logs from all performance tables
+    perf_tables = [
+        ("bpm_adapter_table", "bpm_adapter_logs"),
+        ("bpm_perf_table", "bpm_perf_logs"),
+        ("m2e_perf_table", "m2e_perf_logs"),
+        ("maf_perf_table", "maf_perf_logs")
+    ]
+    
+    for table_key, table_name in perf_tables:
+        print(f"\nAnalyzing {table_name}...")
+        
+        try:
+            # Use total_elapsed_ms for performance tables
+            perf_logs = (spark.table(config[table_key])
+                .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .filter(col("total_elapsed_ms").isNotNull())
+            )
+            
+            perf_stats = (perf_logs
+                .groupBy("service")
+                .agg(
+                    expr(f"percentile(total_elapsed_ms, 0.95)").alias("p95"),
+                    expr(f"percentile(total_elapsed_ms, 0.99)").alias("p99"),
+                    avg("total_elapsed_ms").alias("avg_response_time"),
+                    count("*").alias("count_rows")
+                )
+                .filter(col("count_rows") >= 10)
+                .filter((col("p95") > config["high_response_time_p95_threshold_ms"]) |
+                        (col("p99") > config["high_response_time_p99_threshold_ms"]))
+            )
+            
+            for row in perf_stats.collect():
+                if row.p99 > config["high_response_time_p99_threshold_ms"]:
+                    severity = "CRITICAL"
+                    metric = row.p99
+                    metric_name = "p99_response_time_ms"
+                    threshold = config["high_response_time_p99_threshold_ms"]
+                else:
+                    severity = "HIGH"
+                    metric = row.p95
+                    metric_name = "p95_response_time_ms"
+                    threshold = config["high_response_time_p95_threshold_ms"]
+                
+                anomaly = create_anomaly_record(
+                    anomaly_type="HIGH_RESPONSE_TIME",
+                    severity=severity,
+                    time_window_start=time_windows["long_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=row.service,
+                    metric_name=metric_name,
+                    metric_value=metric,
+                    threshold_value=threshold,
+                    baseline_value=row.avg_response_time,
+                    details=f"High response time detected in {table_name}: {metric_name}={metric:.0f}ms (avg: {row.avg_response_time:.0f}ms)",
+                    log_count=row.count_rows,
+                    metadata={
+                        "p95": str(row.p95),
+                        "p99": str(row.p99),
+                        "source_table": table_name
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {row.service}: {metric_name}={metric:.0f}ms (threshold: {threshold}ms)")
+        
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_name}: {str(e)}")
+            continue
+    
+    print(f"\nFound {len(anomalies)} high response time anomalies")
     return anomalies
 
 # COMMAND ----------
@@ -397,85 +461,64 @@ def detect_high_response_times(config, time_windows):
 def detect_transaction_timeouts(config, time_windows):
     """
     Detect incomplete transactions that likely timed out
+    Checks all performance-type tables with TrailMarks
     """
     print("\n=== Detecting Transaction Timeouts ===")
     
     anomalies = []
     
-    # Check BPM logs for incomplete trails
-    bpm_logs = spark.table(config["bpm_table"])
+    # Check all performance tables that have TrailMarks
+    perf_tables = [
+        ("bpm_adapter_table", "bpm_adapter_logs"),
+        ("bpm_perf_table", "bpm_perf_logs"),
+        ("m2e_perf_table", "m2e_perf_logs"),
+        ("maf_perf_table", "maf_perf_logs")
+    ]
     
-    timeouts = (bpm_logs
-        .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .filter(col("has_incomplete_trails") == True)
-        .groupBy("service", "cluster")
-        .agg(
-            count("*").alias("timeout_count"),
-            avg("total_elapsed_ms").alias("avg_elapsed_before_timeout")
-        )
-        .filter(col("timeout_count") >= 3)
-    )
+    for table_key, table_name in perf_tables:
+        print(f"\nAnalyzing {table_name}...")
+        
+        try:
+            logs = spark.table(config[table_key])
+            
+            timeouts = (logs
+                .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .filter(col("has_incomplete_trails") == True)
+                .groupBy("service", "cluster")
+                .agg(
+                    count("*").alias("timeout_count"),
+                    avg("total_elapsed_ms").alias("avg_elapsed_before_timeout")
+                )
+                .filter(col("timeout_count") >= 3)
+            )
+            
+            for row in timeouts.collect():
+                anomaly = create_anomaly_record(
+                    anomaly_type="TRANSACTION_TIMEOUT",
+                    severity="HIGH",
+                    time_window_start=time_windows["long_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=row.service,
+                    affected_cluster=row.cluster,
+                    metric_name="timeout_count",
+                    metric_value=row.timeout_count,
+                    threshold_value=3,
+                    details=f"Multiple incomplete transactions detected in {table_name}: {row.timeout_count} timeouts",
+                    log_count=row.timeout_count,
+                    metadata={
+                        "avg_elapsed_before_timeout_ms": str(row.avg_elapsed_before_timeout) if row.avg_elapsed_before_timeout else "N/A",
+                        "source_table": table_name
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {row.service}: {row.timeout_count} timeouts (avg elapsed: {row.avg_elapsed_before_timeout:.0f}ms)" if row.avg_elapsed_before_timeout else f"  - {row.service}: {row.timeout_count} timeouts")
+        
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_name}: {str(e)}")
+            continue
     
-    for row in timeouts.collect():
-        anomaly = create_anomaly_record(
-            anomaly_type="TRANSACTION_TIMEOUT",
-            severity="HIGH",
-            time_window_start=time_windows["long_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.service,
-            affected_cluster=row.cluster,
-            metric_name="timeout_count",
-            metric_value=row.timeout_count,
-            threshold_value=3,
-            details=f"Multiple incomplete transactions detected: {row.timeout_count} timeouts",
-            log_count=row.timeout_count,
-            metadata={
-                "avg_elapsed_before_timeout_ms": str(row.avg_elapsed_before_timeout),
-                "log_type": "bpm"
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.service}: {row.timeout_count} timeouts (avg elapsed: {row.avg_elapsed_before_timeout:.0f}ms)")
-    
-    # Check performance logs for incomplete trails
-    perf_logs = spark.table(config["performance_table"])
-    
-    perf_timeouts = (perf_logs
-        .filter((col("log_timestamp") >= lit(time_windows["long_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .filter(col("has_incomplete_trails") == True)
-        .groupBy("service", "cluster", "instance_name")
-        .agg(
-            count("*").alias("timeout_count"),
-            avg("incomplete_trail_count").alias("avg_incomplete_trails")
-        )
-        .filter(col("timeout_count") >= 3)
-    )
-    
-    for row in perf_timeouts.collect():
-        anomaly = create_anomaly_record(
-            anomaly_type="TRANSACTION_TIMEOUT",
-            severity="HIGH",
-            time_window_start=time_windows["long_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.service,
-            affected_instance=row.instance_name,
-            affected_cluster=row.cluster,
-            metric_name="timeout_count",
-            metric_value=row.timeout_count,
-            threshold_value=3,
-            details=f"Multiple incomplete transactions detected: {row.timeout_count} timeouts",
-            log_count=row.timeout_count,
-            metadata={
-                "avg_incomplete_trails": str(row.avg_incomplete_trails),
-                "log_type": "performance"
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.service} ({row.instance_name}): {row.timeout_count} timeouts")
-    
-    print(f"Found {len(anomalies)} transaction timeout anomalies")
+    print(f"\nFound {len(anomalies)} transaction timeout anomalies")
     return anomalies
 
 # COMMAND ----------
@@ -488,81 +531,98 @@ def detect_transaction_timeouts(config, time_windows):
 def detect_volume_anomalies(config, time_windows):
     """
     Detect sudden drops or spikes in log volume
+    Checks all 9 log tables
     """
     print("\n=== Detecting Log Volume Anomalies ===")
     
     anomalies = []
     
-    # Check each log type
-    for table_name, table_key in [
-        (config["audit_table"], "audit"),
-        (config["bpm_table"], "bpm"),
-        (config["performance_table"], "performance")
-    ]:
-        logs = spark.table(table_name)
-        
-        # Calculate current volume (last 15 minutes)
-        current_volume = (logs
-            .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
-                    (col("log_timestamp") <= lit(time_windows["current_time"])))
-            .groupBy("service")
-            .agg(count("*").alias("current_count"))
-        )
-        
-        # Calculate baseline volume (same 15-minute window, averaged over past 7 days)
-        minutes_diff = config["medium_window_minutes"]
-        baseline_volume = (logs
-            .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
-                    (col("log_timestamp") <= lit(time_windows["baseline_end"])))
-            .withColumn("time_bucket", 
-                        floor(unix_timestamp("log_timestamp") / (minutes_diff * 60)))
-            .groupBy("service", "time_bucket")
-            .agg(count("*").alias("bucket_count"))
-            .groupBy("service")
-            .agg(avg("bucket_count").alias("baseline_avg_count"))
-        )
-        
-        # Compare volumes
-        comparison = (current_volume
-            .join(baseline_volume, "service", "left")
-            .filter(col("baseline_avg_count").isNotNull())
-            .withColumn("volume_ratio", 
-                        col("current_count") / (col("baseline_avg_count") + 0.1))
-            .filter((col("volume_ratio") > config["volume_anomaly_threshold_multiplier"]) |
-                    (col("volume_ratio") < (1.0 / config["volume_anomaly_threshold_multiplier"])))
-        )
-        
-        for row in comparison.collect():
-            if row.volume_ratio > config["volume_anomaly_threshold_multiplier"]:
-                anomaly_subtype = "VOLUME_SPIKE"
-                severity = "MEDIUM"
-                details = f"Log volume spike: {row.current_count} logs vs baseline {row.baseline_avg_count:.0f}"
-            else:
-                anomaly_subtype = "VOLUME_DROP"
-                severity = "HIGH"
-                details = f"Log volume drop: {row.current_count} logs vs baseline {row.baseline_avg_count:.0f}"
-            
-            anomaly = create_anomaly_record(
-                anomaly_type=anomaly_subtype,
-                severity=severity,
-                time_window_start=time_windows["medium_window_start"],
-                time_window_end=time_windows["current_time"],
-                affected_service=row.service,
-                metric_name="log_count",
-                metric_value=row.current_count,
-                threshold_value=row.baseline_avg_count * config["volume_anomaly_threshold_multiplier"],
-                baseline_value=row.baseline_avg_count,
-                details=details,
-                log_count=row.current_count,
-                metadata={
-                    "volume_ratio": str(row.volume_ratio),
-                    "log_type": table_key
-                }
-            )
-            anomalies.append(anomaly)
-            print(f"  - {table_key}/{row.service}: {anomaly_subtype} (ratio: {row.volume_ratio:.2f}x)")
+    # Check all log tables
+    log_tables = [
+        (config["bpm_adapter_table"], "bpm_adapter"),
+        (config["bpm_audit_table"], "bpm_audit"),
+        (config["bpm_perf_table"], "bpm_perf"),
+        (config["m2e_audit_table"], "m2e_audit"),
+        (config["m2e_perf_table"], "m2e_perf"),
+        (config["maf_perf_table"], "maf_perf")
+    ]
     
-    print(f"Found {len(anomalies)} log volume anomalies")
+    for table_name, table_key in log_tables:
+        print(f"\nAnalyzing {table_key}...")
+        
+        try:
+            logs = spark.table(table_name)
+            
+            # For tables without service column, use a default
+            if table_key in ["bpm_audit", "m2e_audit"]:
+                logs = logs.withColumn("service", coalesce(col("transaction_name"), lit("audit_service")))
+            
+            # Calculate current volume (last 15 minutes)
+            current_volume = (logs
+                .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .groupBy("service")
+                .agg(count("*").alias("current_count"))
+            )
+            
+            # Calculate baseline volume (same 15-minute window, averaged over past 7 days)
+            minutes_diff = config["medium_window_minutes"]
+            baseline_volume = (logs
+                .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["baseline_end"])))
+                .withColumn("time_bucket", 
+                            floor(unix_timestamp("log_timestamp") / (minutes_diff * 60)))
+                .groupBy("service", "time_bucket")
+                .agg(count("*").alias("bucket_count"))
+                .groupBy("service")
+                .agg(avg("bucket_count").alias("baseline_avg_count"))
+            )
+            
+            # Compare volumes
+            comparison = (current_volume
+                .join(baseline_volume, "service", "left")
+                .filter(col("baseline_avg_count").isNotNull())
+                .withColumn("volume_ratio", 
+                            col("current_count") / (col("baseline_avg_count") + 0.1))
+                .filter((col("volume_ratio") > config["volume_anomaly_threshold_multiplier"]) |
+                        (col("volume_ratio") < (1.0 / config["volume_anomaly_threshold_multiplier"])))
+            )
+            
+            for row in comparison.collect():
+                if row.volume_ratio > config["volume_anomaly_threshold_multiplier"]:
+                    anomaly_subtype = "VOLUME_SPIKE"
+                    severity = "MEDIUM"
+                    details = f"Log volume spike in {table_key}: {row.current_count} logs vs baseline {row.baseline_avg_count:.0f}"
+                else:
+                    anomaly_subtype = "VOLUME_DROP"
+                    severity = "HIGH"
+                    details = f"Log volume drop in {table_key}: {row.current_count} logs vs baseline {row.baseline_avg_count:.0f}"
+                
+                anomaly = create_anomaly_record(
+                    anomaly_type=anomaly_subtype,
+                    severity=severity,
+                    time_window_start=time_windows["medium_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=row.service,
+                    metric_name="log_count",
+                    metric_value=row.current_count,
+                    threshold_value=row.baseline_avg_count * config["volume_anomaly_threshold_multiplier"],
+                    baseline_value=row.baseline_avg_count,
+                    details=details,
+                    log_count=row.current_count,
+                    metadata={
+                        "volume_ratio": str(row.volume_ratio),
+                        "source_table": table_key
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {table_key}/{row.service}: {anomaly_subtype} (ratio: {row.volume_ratio:.2f}x)")
+        
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_key}: {str(e)}")
+            continue
+    
+    print(f"\nFound {len(anomalies)} log volume anomalies")
     return anomalies
 
 # COMMAND ----------
@@ -575,73 +635,90 @@ def detect_volume_anomalies(config, time_windows):
 def detect_service_degradation(config, time_windows):
     """
     Detect gradual performance degradation trends
+    Checks all performance-type tables
     """
     print("\n=== Detecting Service Degradation ===")
     
     anomalies = []
     
-    # Check performance logs
-    perf_logs = spark.table(config["performance_table"])
+    # Check all performance tables
+    perf_tables = [
+        (config["bpm_adapter_table"], "bpm_adapter_logs", "total_elapsed_ms"),
+        (config["bpm_perf_table"], "bpm_perf_logs", "total_elapsed_ms"),
+        (config["m2e_perf_table"], "m2e_perf_logs", "total_elapsed_ms"),
+        (config["maf_perf_table"], "maf_perf_logs", "total_elapsed_ms")
+    ]
     
-    # Calculate response times for recent period vs baseline
-    recent_perf = (perf_logs
-        .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
-                (col("log_timestamp") <= lit(time_windows["current_time"])))
-        .filter(col("response_time_ms").isNotNull())
-        .groupBy("service", "instance_name")
-        .agg(
-            avg("response_time_ms").alias("recent_avg_response_time"),
-            count("*").alias("recent_count")
-        )
-        .filter(col("recent_count") >= 5)
-    )
-    
-    baseline_perf = (perf_logs
-        .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
-                (col("log_timestamp") <= lit(time_windows["baseline_end"])))
-        .filter(col("response_time_ms").isNotNull())
-        .groupBy("service", "instance_name")
-        .agg(
-            avg("response_time_ms").alias("baseline_avg_response_time"),
-            count("*").alias("baseline_count")
-        )
-        .filter(col("baseline_count") >= 10)
-    )
-    
-    # Compare recent vs baseline
-    degradation = (recent_perf
-        .join(baseline_perf, ["service", "instance_name"], "inner")
-        .withColumn("degradation_percent",
-                    ((col("recent_avg_response_time") - col("baseline_avg_response_time")) / 
-                     col("baseline_avg_response_time")) * 100)
-        .filter(col("degradation_percent") >= config["degradation_increase_threshold_percent"])
-    )
-    
-    for row in degradation.collect():
-        severity = "CRITICAL" if row.degradation_percent >= 100 else "HIGH"
+    for table_key, table_name, metric_col in perf_tables:
+        print(f"\nAnalyzing {table_name}...")
         
-        anomaly = create_anomaly_record(
-            anomaly_type="SERVICE_DEGRADATION",
-            severity=severity,
-            time_window_start=time_windows["medium_window_start"],
-            time_window_end=time_windows["current_time"],
-            affected_service=row.service,
-            affected_instance=row.instance_name,
-            metric_name="avg_response_time_ms",
-            metric_value=row.recent_avg_response_time,
-            threshold_value=row.baseline_avg_response_time * (1 + config["degradation_increase_threshold_percent"] / 100),
-            baseline_value=row.baseline_avg_response_time,
-            details=f"Performance degradation: {row.degradation_percent:.1f}% slower than baseline ({row.recent_avg_response_time:.0f}ms vs {row.baseline_avg_response_time:.0f}ms)",
-            log_count=row.recent_count,
-            metadata={
-                "degradation_percent": str(row.degradation_percent),
-                "baseline_count": str(row.baseline_count)
-            }
-        )
-        anomalies.append(anomaly)
-        print(f"  - {row.service} ({row.instance_name}): {row.degradation_percent:.1f}% slower")
+        try:
+            perf_logs = spark.table(table_key)
+            
+            # Calculate response times for recent period vs baseline
+            recent_perf = (perf_logs
+                .filter((col("log_timestamp") >= lit(time_windows["medium_window_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["current_time"])))
+                .filter(col(metric_col).isNotNull())
+                .groupBy("service", "instance_name")
+                .agg(
+                    avg(metric_col).alias("recent_avg_response_time"),
+                    count("*").alias("recent_count")
+                )
+                .filter(col("recent_count") >= 5)
+            )
+            
+            baseline_perf = (perf_logs
+                .filter((col("log_timestamp") >= lit(time_windows["baseline_start"])) &
+                        (col("log_timestamp") <= lit(time_windows["baseline_end"])))
+                .filter(col(metric_col).isNotNull())
+                .groupBy("service", "instance_name")
+                .agg(
+                    avg(metric_col).alias("baseline_avg_response_time"),
+                    count("*").alias("baseline_count")
+                )
+                .filter(col("baseline_count") >= 10)
+            )
+            
+            # Compare recent vs baseline
+            degradation = (recent_perf
+                .join(baseline_perf, ["service", "instance_name"], "inner")
+                .withColumn("degradation_percent",
+                            ((col("recent_avg_response_time") - col("baseline_avg_response_time")) / 
+                             col("baseline_avg_response_time")) * 100)
+                .filter(col("degradation_percent") >= config["degradation_increase_threshold_percent"])
+            )
+            
+            for row in degradation.collect():
+                severity = "CRITICAL" if row.degradation_percent >= 100 else "HIGH"
+                
+                anomaly = create_anomaly_record(
+                    anomaly_type="SERVICE_DEGRADATION",
+                    severity=severity,
+                    time_window_start=time_windows["medium_window_start"],
+                    time_window_end=time_windows["current_time"],
+                    affected_service=row.service,
+                    affected_instance=row.instance_name,
+                    metric_name="avg_response_time_ms",
+                    metric_value=row.recent_avg_response_time,
+                    threshold_value=row.baseline_avg_response_time * (1 + config["degradation_increase_threshold_percent"] / 100),
+                    baseline_value=row.baseline_avg_response_time,
+                    details=f"Performance degradation in {table_name}: {row.degradation_percent:.1f}% slower than baseline ({row.recent_avg_response_time:.0f}ms vs {row.baseline_avg_response_time:.0f}ms)",
+                    log_count=row.recent_count,
+                    metadata={
+                        "degradation_percent": str(row.degradation_percent),
+                        "baseline_count": str(row.baseline_count),
+                        "source_table": table_name
+                    }
+                )
+                anomalies.append(anomaly)
+                print(f"  - {row.service} ({row.instance_name}): {row.degradation_percent:.1f}% slower")
+        
+        except Exception as e:
+            print(f"  Warning: Could not analyze {table_name}: {str(e)}")
+            continue
     
-    print(f"Found {len(anomalies)} service degradation anomalies")
+    print(f"\nFound {len(anomalies)} service degradation anomalies")
     return anomalies
 
 # COMMAND ----------

@@ -113,30 +113,60 @@ resources:
       name: "[${bundle.target}] Streaming Ingestion Pipeline"
       
       tasks:
-        - task_key: ingest_audit_logs
+        - task_key: ingest_bpm_adapter_logs
           existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
           notebook_task:
-            notebook_path: ./src/streaming_ingestion/ingest_audit_logs.py
+            notebook_path: ./src/streaming_ingestion/ingest_bpm_adapter_logs.py
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               volume_name: ${var.volume_name}
           timeout_seconds: 0
         
-        - task_key: ingest_bpm_logs
+        - task_key: ingest_bpm_audit_logs
           existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
           notebook_task:
-            notebook_path: ./src/streaming_ingestion/ingest_bpm_logs.py
+            notebook_path: ./src/streaming_ingestion/ingest_bpm_audit_logs.py
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
               volume_name: ${var.volume_name}
           timeout_seconds: 0
         
-        - task_key: ingest_performance_logs
+        - task_key: ingest_bpm_perf_logs
           existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
           notebook_task:
-            notebook_path: ./src/streaming_ingestion/ingest_performance_logs.py
+            notebook_path: ./src/streaming_ingestion/ingest_bpm_perf_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+        
+        - task_key: ingest_m2e_audit_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_m2e_audit_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+        
+        - task_key: ingest_m2e_perf_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_m2e_perf_logs.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume_name: ${var.volume_name}
+          timeout_seconds: 0
+        
+        - task_key: ingest_maf_perf_logs
+          existing_cluster_id: ${resources.clusters.shared_log_analysis_cluster.id}
+          notebook_task:
+            notebook_path: ./src/streaming_ingestion/ingest_maf_perf_logs.py
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}

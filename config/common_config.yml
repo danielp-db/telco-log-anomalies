@@ -8,6 +8,15 @@ database:
   schema: "log_anomaly"
   volume_name: "raw_logs"
 
+# Log Types and Table Names
+log_types:
+  bpm_adapter: "bpm_adapter_logs"
+  bpm_audit: "bpm_audit_logs"
+  bpm_perf: "bpm_perf_logs"
+  m2e_audit: "m2e_audit_logs"
+  m2e_perf: "m2e_perf_logs"
+  maf_perf: "maf_perf_logs"
+
 # Log Generation Settings
 log_generation:
   interval_seconds: 5        # Generate logs every 5 seconds

@@ -1,2 +1,5 @@
 
 .databricks
+
+# Ignore all .txt files in data_templates folders
+data_templates/**/*.txt

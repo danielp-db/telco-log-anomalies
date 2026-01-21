@@ -1,7 +1,7 @@
 # Databricks notebook source
 """
-Audit Logs Streaming Ingestion
-Continuously reads JSON audit logs from Volume and writes to Delta table using Structured Streaming.
+BPM Audit Logs Streaming Ingestion
+Continuously reads JSON BPM audit logs from Volume and writes to Delta table using Structured Streaming.
 """
 
 # COMMAND ----------
@@ -31,17 +31,17 @@ config = {
     "catalog": catalog,
     "schema": schema,
     "volume_name": volume_name,
-    "audit_logs_path": f"/Volumes/{catalog}/{schema}/{volume_name}/audit",
-    "audit_checkpoint": f"/Volumes/{catalog}/{schema}/{volume_name}/_checkpoints/audit",
-    "audit_table": f"{catalog}.{schema}.audit_logs",
+    "bpm_audit_logs_path": f"/Volumes/{catalog}/{schema}/{volume_name}/bpm_audit",
+    "bpm_audit_checkpoint": f"/Volumes/{catalog}/{schema}/{volume_name}/_checkpoints/bpm_audit",
+    "bpm_audit_table": f"{catalog}.{schema}.{yaml_config['log_types']['bpm_audit']}",
     "max_files_per_trigger": yaml_config["streaming"]["max_files_per_trigger"],
     "trigger_processing_time": yaml_config["streaming"]["trigger_processing_time"],
 }
 
 print("Configuration loaded:")
-print(f"  Source: {config['audit_logs_path']}")
-print(f"  Target: {config['audit_table']}")
-print(f"  Checkpoint: {config['audit_checkpoint']}")
+print(f"  Source: {config['bpm_audit_logs_path']}")
+print(f"  Target: {config['bpm_audit_table']}")
+print(f"  Checkpoint: {config['bpm_audit_checkpoint']}")
 
 # COMMAND ----------
 
@@ -50,57 +50,59 @@ print(f"  Checkpoint: {config['audit_checkpoint']}")
 
 # COMMAND ----------
 
-# Define the schema for audit logs based on the template
-audit_schema = StructType([
-    StructField("timeMillis", LongType(), True),
-    StructField("thread", StringType(), True),
+# Define the schema for BPM audit logs
+bpm_audit_schema = StructType([
+    StructField("contextMap", MapType(StringType(), StringType()), True),
+    StructField("endOfBatch", BooleanType(), True),
+    StructField("filename", StringType(), True),
     StructField("level", StringType(), True),
+    StructField("log_uuid", StringType(), True),
+    StructField("loggerFqcn", StringType(), True),
     StructField("loggerName", StringType(), True),
     StructField("message", StructType([
+        StructField("Description", StringType(), True),
+        StructField("InstanceName", StringType(), True),
+        StructField("ApplicationId", StringType(), True),
         StructField("OriginalMessageId", StringType(), True),
-        StructField("Vtier", StringType(), True),
-        StructField("ClientIP", StringType(), True),
-        StructField("RequestURL", StringType(), True),
-        StructField("SourceClass", StringType(), True),
+        StructField("UniqueTransactionId", StringType(), True),
+        StructField("OriginatorId", StringType(), True),
+        StructField("Subject", StringType(), True),
+        StructField("ConversationId", StringType(), True),
         StructField("OriginationSystemId", StringType(), True),
         StructField("OriginationSystemVersion", StringType(), True),
         StructField("OriginationSystemName", StringType(), True),
+        StructField("SourceClass", StringType(), True),
         StructField("SourceMethod", StringType(), True),
         StructField("TransactionName", StringType(), True),
         StructField("TransactionStatus", StringType(), True),
         StructField("HostIPAddress", StringType(), True),
+        StructField("HostName", StringType(), True),
+        StructField("ResponseCode", StringType(), True),
+        StructField("ResponseDescription", StringType(), True),
         StructField("FaultTimestamp", StringType(), True),
+        StructField("FaultSequenceNumber", StringType(), True),
+        StructField("FaultLevel", StringType(), True),
+        StructField("FaultCode", StringType(), True),
+        StructField("FaultDescription", StringType(), True),
+        StructField("ExternalFaultCode", StringType(), True),
+        StructField("ExternalFaultDescription", StringType(), True),
         StructField("FaultEntity", StringType(), True),
         StructField("InitiatedTimestamp", StringType(), True),
         StructField("ElapsedTime", StringType(), True),
-        StructField("Subject", StringType(), True),
-        StructField("HostName", StringType(), True),
-        StructField("ResponseCode", StringType(), True),
-        StructField("Description", StringType(), True),
         StructField("Mode", StringType(), True),
-        StructField("HttpMethod", StringType(), True),
-        StructField("Cluster", StringType(), True),
         StructField("ServiceKeyData1", StringType(), True),
         StructField("ServiceKeyData2", StringType(), True),
+        StructField("Cluster", StringType(), True),
         StructField("ClientApp", StringType(), True),
-        StructField("ExternalFaultDescription", StringType(), True),
-        StructField("FaultSequenceNumber", StringType(), True),
-        StructField("FaultLevel", StringType(), True),
-        StructField("ExternalFaultCode", StringType(), True),
-        StructField("ConversationId", StringType(), True),
-        StructField("UniqueTransactionId", StringType(), True),
-        StructField("OriginatorId", StringType(), True),
-        StructField("ApplicationId", StringType(), True),
-        StructField("FaultCode", StringType(), True),
-        StructField("FaultDescription", StringType(), True),
-        StructField("InstanceName", StringType(), True),
-        StructField("ResponseDescription", StringType(), True)
+        StructField("Vtier", StringType(), True),
+        StructField("ClientIP", StringType(), True),
+        StructField("HttpMethod", StringType(), True),
+        StructField("RequestURL", StringType(), True)
     ]), True),
-    StructField("endOfBatch", BooleanType(), True),
-    StructField("loggerFqcn", StringType(), True),
-    StructField("contextMap", MapType(StringType(), StringType()), True),
+    StructField("thread", StringType(), True),
     StructField("threadId", LongType(), True),
-    StructField("threadPriority", LongType(), True)
+    StructField("threadPriority", LongType(), True),
+    StructField("timeMillis", LongType(), True)
 ])
 
 # COMMAND ----------
@@ -111,12 +113,12 @@ audit_schema = StructType([
 # COMMAND ----------
 
 # Read streaming data from the volume
-audit_stream = (spark
+bpm_audit_stream = (spark
     .readStream
     .format("json")
-    .schema(audit_schema)
+    .schema(bpm_audit_schema)
     .option("maxFilesPerTrigger", config["max_files_per_trigger"])
-    .load(config["audit_logs_path"])
+    .load(config["bpm_audit_logs_path"])
 )
 
 # COMMAND ----------
@@ -127,7 +129,7 @@ audit_stream = (spark
 # COMMAND ----------
 
 # Add ingestion timestamp and process the data
-audit_processed = (audit_stream
+bpm_audit_processed = (bpm_audit_stream
     .withColumn("ingestion_timestamp", current_timestamp())
     .withColumn("log_timestamp", from_unixtime(col("timeMillis") / 1000).cast("timestamp"))
     .withColumn("transaction_name", col("message.TransactionName"))
@@ -162,6 +164,11 @@ audit_processed = (audit_stream
                 .otherwise(None))
     .withColumn("response_time_ms",
                 coalesce(col("elapsed_time_ms"), col("response_time_calculated_ms")))
+    # Extract context map tracing info if available
+    .withColumn("service_name", col("contextMap")["service.name"])
+    .withColumn("span_id", col("contextMap")["span_id"])
+    .withColumn("trace_id", col("contextMap")["trace_id"])
+    .withColumn("trace_flags", col("contextMap")["trace_flags"])
 )
 
 # COMMAND ----------
@@ -177,14 +184,14 @@ spark.sql(f"CREATE SCHEMA IF NOT EXISTS {config['catalog']}.{config['schema']}")
 # COMMAND ----------
 
 # Write the streaming data to Delta table
-query = (audit_processed
+query = (bpm_audit_processed
     .writeStream
     .format("delta")
     .outputMode("append")
-    .option("checkpointLocation", config["audit_checkpoint"])
+    .option("checkpointLocation", config["bpm_audit_checkpoint"])
     .trigger(processingTime=config["trigger_processing_time"])
     .option("mergeSchema", "true")
-    .toTable(config["audit_table"])
+    .toTable(config["bpm_audit_table"])
 )
 
 # COMMAND ----------
@@ -197,15 +204,13 @@ query = (audit_processed
 # Display stream status
 print(f"Stream ID: {query.id}")
 print(f"Stream Status: {query.status}")
-print(f"\nStreaming audit logs from {config['audit_logs_path']}")
-print(f"Writing to table: {config['audit_table']}")
-print(f"Checkpoint location: {config['audit_checkpoint']}")
+print(f"\nStreaming BPM audit logs from {config['bpm_audit_logs_path']}")
+print(f"Writing to table: {config['bpm_audit_table']}")
+print(f"Checkpoint location: {config['bpm_audit_checkpoint']}")
 print("\nStream is running. Monitor progress in the Spark UI.")
 
 # COMMAND ----------
 
 # Keep the stream running
-# In a production environment, this would run continuously
-# The stream can be stopped via the Databricks UI or by stopping the job
 query.awaitTermination()
 
